@@ -1,1 +1,1 @@
-# gaussian_flowfield_approx
+# Flowfield approximation with Gaussian Ridge Functions
