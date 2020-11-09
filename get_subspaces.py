@@ -4,9 +4,10 @@ import json
 import numpy as np
 from tqdm import tqdm
 from funcs import r2_score, mae_score, datapoint, standardise_minmax
-from joblib import Parallel, delayed, cpu_count
+from joblib import Parallel, delayed, cpu_count, parallel_backend
 from grf import grf
 import pickle
+import warnings
 
 basedir = os.getcwd()
 
@@ -24,10 +25,18 @@ vars = json_dat['vars'] #list of vars indexes to find subspaces for. (See orderi
 subdim = json_dat['subdim']
 n_jobs = json_dat['njobs']
 cutoff = json_dat['cutoff']
-nattempts   = json_dat['nattempts']
-maxiter     = json_dat['maxiter']
-mingradnorm = json_dat['mingradnorm']
-minstepsize = json_dat['minstepsize']
+
+nattempts = 3
+if (("nattempts" in json_dat)==True): nattempts = json_dat['nattempts']
+
+maxiter = 20
+if (("maxiter" in json_dat)==True): maxiter = json_dat['maxiter']
+
+mingradnorm = 1e-6
+if (("mingradnorm" in json_dat)==True): mingradnorm = json_dat['mingradnorm']
+
+minstepsize = 1e-8
+if (("minstepsize" in json_dat)==True): minstepsize = json_dat['minstepsize']
 
 maxd = None
 if (("maxd" in json_dat)==True): maxd = json_dat['maxd']
@@ -43,7 +52,7 @@ os.chdir(dataloc)
 X_train = np.load('X.npy')
 X_train, min_X, max_X = standardise_minmax(X_train)
 X_test = np.load('X_test.npy')
-X_test,*_ = standardise_minmax(X_test,min_value=min_X,max_value=max_X)
+X_test,_,_ = standardise_minmax(X_test,min_value=min_X,max_value=max_X)
 
 data_train = np.load('D.npy',allow_pickle=True)
 data_test  = np.load('D_test.npy',allow_pickle=True)
@@ -77,21 +86,30 @@ def get_subspaces(X_train,data_train, X_test, data_test, var,subdim=1,nattempts=
         X_test  = X_test[index]
         y_test  = y_test[index]
 
-    mygrf = grf(subdim=subdim,nattempts=nattempts,verbose=1,maxiter=maxiter,mingradnorm=mingradnorm,minstepsize=minstepsize,maxcostevals=5000)
-    mygrf.fit(X_train, X_val, y_train, y_val, tol = 5e-4)
+    # Find Gaussian ridges
+    warnings.filterwarnings("error")
+    try:
+        mygrf = grf(subdim=subdim,nattempts=nattempts,verbose=0,maxiter=maxiter,mingradnorm=mingradnorm,minstepsize=minstepsize,maxcostevals=5000)
+        mygrf.fit(X_train, X_test, y_train, y_test, tol = 5e-4)
 
-    M = mygrf.M
-    u_train = X_train @ M
-    u_test  = X_test @ M
+        M = mygrf.M
+        u_train = X_train @ M
+        u_test  = X_test @ M
 
-    y_pred_train = mygrf.predict(u_train.reshape(-1,1),return_std=False)
-    y_pred_test  = mygrf.predict(u_test.reshape(-1,1),return_std=False)
+        y_pred_train = mygrf.predict(u_train.reshape(-1,1),return_std=False)
+        y_pred_test  = mygrf.predict(u_test.reshape(-1,1),return_std=False)
 
-    # Get training r2 score and MAE at each point. 
-    r2_train  = r2_score(y_train,y_pred_train)
-    mae_train = mae_score(y_train,y_pred_train)
-    r2_test   = r2_score(y_test,y_pred_test)
-    mae_test  = mae_score(y_test,y_pred_test)
+        # Get training r2 score and MAE at each point. 
+        r2_train  = r2_score(y_train,y_pred_train)
+        mae_train = mae_score(y_train,y_pred_train)
+        r2_test   = r2_score(y_test,y_pred_test)
+        mae_test  = mae_score(y_test,y_pred_test)
+    except RuntimeWarning:
+        mygrf = None
+        r2_train  = np.nan
+        mae_train = np.nan
+        r2_test  = np.nan
+        mae_test = np.nan
 
     #TODO 
     # Delete attributes in subpoly which are difficult to pickle
@@ -105,15 +123,16 @@ mygrf = np.empty([num_pts,num_vars],dtype='object')
 for var in vars:
     print('\nVariable index %d...' % var)
 
-    results = Parallel(n_jobs=n_jobs)(delayed(get_subspaces)(X_train, data_train[j].item(), X_test, data_test[j].item(), var, subdim=subdim,
-        nattempts=nattempts, maxiter=maxiter, mingradnorm mingradnorm, minstepsize=minstepsize, maxd=None) for j in tqdm(to_run))
+    with parallel_backend("loky", inner_max_num_threads=4):
+        results = Parallel(n_jobs=n_jobs)(delayed(get_subspaces)(X_train, data_train[j].item(), X_test, data_test[j].item(), var, subdim=subdim,
+            nattempts=nattempts, maxiter=maxiter, mingradnorm=mingradnorm, minstepsize=minstepsize, maxd=None) for j in tqdm(to_run))
 
     mygrf[to_run,var] = np.array([item[0] for item in results]).reshape(-1,1)
     r2_train          = [item[1] for item in results]
     mae_train         = [item[2] for item in results]
-    r2_train          = [item[3] for item in results]
-    mae_train         = [item[4] for item in results]
-
+    r2_test           = [item[3] for item in results]
+    mae_test          = [item[4] for item in results]
+    
     # Print average r2 score
     print('Average training r2 score = %.3f' %(np.mean(r2_train)))
     print('Average training mae      = %.4f' %(np.mean(mae_train)))

@@ -41,7 +41,7 @@ def proc_data(d,casename,resample=False,solver='incompressible_SA'):
     elif solver == 'incompressible_SA':
         Uref  = 1.0
         muref = 1.853e-05 
-        num_var = 1 # Cp, T, u,v for now...
+        num_var = 4 # Cp, T, u,v for now...
 
     # Read in the base mesh to resample on to
     if resample:
@@ -76,11 +76,10 @@ def proc_data(d,casename,resample=False,solver='incompressible_SA'):
         D[index,2] = (designgrid.point_arrays['Momentum'][index,0]/ro[index])/Uref #u
         D[index,3] = (designgrid.point_arrays['Momentum'][index,1]/ro[index])/Uref #v
     elif solver == 'incompressible_SA':
-        Cp = designgrid.point_arrays['Pressure_Coefficient'][index] #p
-        u  = designgrid.point_arrays['Velocity'][index,0] #u
-        v  = designgrid.point_arrays['Velocity'][index,1] #u
-        Yp = 1.0 - (Cp + (1/Uref**2)*(u**2+v**2))
-        D[index,0] = Yp
+        D[index,0] = designgrid.point_arrays['Pressure_Coefficient'][index] #p
+        D[index,1] = designgrid.point_arrays['Eddy_Viscosity'][index]/muref #mut
+        D[index,2] = designgrid.point_arrays['Velocity'][index,0]/Uref #u
+        D[index,3] = designgrid.point_arrays['Velocity'][index,1]/Uref #v
 
     # Read bump data
     deform_data, *_ = proc_bump('deform_hh.cfg')

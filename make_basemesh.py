@@ -10,13 +10,13 @@ basedir = os.getcwd()
 # Inputs
 #################################################################################
 # Fine box limits
-xbox  = [-0.2,1.2]
+xbox  = [-0.15,1.15]
 ybox  = [-0.15,0.15]
-boxdx = [0.005,0.005] 
+boxdx = [0.02,0.015] 
 
 # growth rate outside of box
-xgr = 1.2
-ygr = 1.2
+xgr = 1.5
+ygr = 1.5
 xdist = 0.8 
 ydist = 0.4
 
