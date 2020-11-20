@@ -7,7 +7,7 @@ from pymanopt import Problem
 from funcs import standardise_minmax, unstandardise_minmax
 
 class grf:
-    def __init__(self,subdim=1,verbose=0,maxtime=5,maxiter=100,mingradnorm=1e-6,minstepsize=1e-10,maxcostevals=5000,nattempts=3):
+    def __init__(self,subdim=1,verbose=0,maxtime=10,maxiter=100,mingradnorm=1e-6,minstepsize=1e-10,maxcostevals=5000,nattempts=3):
         self.verbose = verbose
         self.subdim  = subdim
         self.maxtime = maxtime
@@ -119,13 +119,13 @@ class grf:
         # Rescale
         
         if return_std:
-            mean = unstandardise_minmax(result[0].reshape(-1,1),self.scaling[0],self.scaling[1]).squeeze()
-            std = result[1].squeeze()*np.sqrt(0.5)*(self.scaling[1]-self.scaling[0])
+            mean = unstandardise_minmax(result[0].reshape(-1,1),self.scaling[0],self.scaling[1])
+            std = result[1]*np.sqrt(0.5)*(self.scaling[1]-self.scaling[0])
                         #unstandardise_minmax(result[1].reshape(-1,1),self.scaling[0],self.scaling[1]).squeeze()
-            return mean, std
+            return mean.squeeze(), std.squeeze()
         else:
-            mean = unstandardise_minmax(result.reshape(-1,1),self.scaling[0],self.scaling[1]).squeeze()
-            return mean
+            mean = unstandardise_minmax(result.reshape(-1,1),self.scaling[0],self.scaling[1])
+            return mean.squeeze()
 
 def cost(M_guess, X_train, X_test, f_train, f_test, kernel):
 

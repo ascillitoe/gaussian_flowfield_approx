@@ -1,13 +1,14 @@
 import os
 import sys
 import json
-import pyvista
+import pyvista as pv
 import numpy as np
 from tqdm import tqdm
 from funcs import proc_bump, datapoint, parse_designs
 from joblib import Parallel, delayed, cpu_count
 
-global basedir
+global basedir, seed
+seed = 42
 basedir = os.getcwd()
 
 # Read json file
@@ -22,6 +23,11 @@ if datadir == '.':
     datadir = basedir
 n_jobs          = json_dat['njobs']
 solver          = json_dat['solver']
+Ncoarse         = json_dat['samples']
+cutoff          = json_dat['cutoff']
+
+eig = False
+if (("eig" in json_dat)==True): eig = json_dat['eig']
 
 designs_train, designs_test = parse_designs(json_dat)
 
@@ -47,13 +53,13 @@ def proc_data(d,casename,resample=False,solver='incompressible_SA'):
     if resample:
         cfd_data = os.path.join(datadir,'CFD_DATA',casename)
         os.chdir(cfd_data)
-        samplegrid = pyvista.read('basegrid.vtk')
+        samplegrid = pv.read('basegrid.vtk')
 
-    # Read design vtk file and resample onto samplegrid
+    # Read design vtk file and resample onto the base grid
     design = 'design_%04d' % d
     cfd_data = os.path.join(datadir,'CFD_DATA',casename,design)
     os.chdir(cfd_data)
-    designgrid = pyvista.read('flow.vtk')
+    designgrid = pv.read('flow.vtk')
 
     # Resample
     if resample:
@@ -86,45 +92,143 @@ def proc_data(d,casename,resample=False,solver='incompressible_SA'):
     
     return (deform_data, D, fluid)
 
-def proc_results(results):
+def proc_results(results,saveloc,idx_coarse=None,idx_fine=None,eig=False):
+    global seed
+    np.random.seed(seed)
+
     X     = np.array([item[0] for item in results])
-#    dtag  = np.array([d for i,d in enumerate(range(len(results)))])
+    D     = np.array([item[1] for item in results])
     fluid = np.array([item[2] for item in results])
-    num_designs = fluid.shape[0]
-    num_pts     = fluid.shape[1]
-    num_vars    = X.shape[1]
+    num_designs = D.shape[0]
+    num_pts     = D.shape[1]
+    num_vars    = D.shape[2]
+    num_bumps   = X.shape[1]
     print('Number of designs = %d' %(num_designs))
     print('Number of nodes = %d' %(num_pts))
-    print('Number of bump functions = %d' %(num_vars))
-    D     = np.array([item[1] for item in results])
+    print('Number of bump functions = %d' %(num_bumps))
+
+    train = False
+    if idx_fine is None and idx_coarse is None: train = True
+
+    if train:
+        ################
+        # Subsample data
+        ################
+        print('Subsampling data...')
+
+        # Random sampling 
+        print('Subsampled number of points: %d' %Ncoarse)
+        # First pick out acceptable points (i.e. where sufficient number of designs have "fluid" at each point)
+        n_valid_designs = np.count_nonzero(fluid == 1, axis=0)
+        idx = np.argwhere(n_valid_designs>=cutoff).reshape(-1)
+#        idx = np.arange(num_pts)
+        # Now subsample remaining points
+        idx_coarse = np.sort(np.random.choice(idx,Ncoarse,replace=False))
+
+        flag = np.full(num_pts,False)
+        flag[idx_coarse] = True
+        idx = np.arange(num_pts)
+        idx_fine = idx[~flag]
+
+        # Save point cloud of subsampled points (for inspection)
+        filename = os.path.join(datadir,'CFD_DATA',casename,'basegrid.vtk')
+        samplegrid = pv.read(filename)
+        points = samplegrid.points[idx_coarse]
+        point_cloud = pv.PolyData(points)
+        point_cloud.save(os.path.join(saveloc,'sample_points.vtk'))
+
+        ############################################
+        # Build covariance matrix (if training data)
+        ############################################
+        # Get mean of data (needed for Schur complement)
+        print('Getting mean of data...')
+        Dmean = np.mean(D,axis=0)
+
+        print('Computing covariance matrix for variable...')
+        # Reorder data so that fine and course subsets are collocated within the data (and Sigma matrix)
+        idx_new = np.concatenate([idx_fine,idx_coarse])
+        Dnew = D[:,idx_new,:].transpose(1,0,2)  # reshape to (num_pts,num_designs,num_var) ordering
+        
+        # Obtain covariance matrix 
+        if eig: eigs = np.empty([num_pts,num_vars])
+        for j in range(num_vars):
+            print(j)
+            Sigma = np.cov(Dnew[:,:,j],bias=True)
+        
+            # Compute eigenvalues
+            if eig:
+                print('Computing eigenvalues...')
+                DD, _ = np.linalg.eigh(Sigma)
+                idx_eig = DD.argsort()[::-1]
+                eigs[:,j] = DD[idx_eig]
+
+            # Save to file
+            print('Saving covariance data...')
+            savefile = os.path.join(saveloc,'covar_%d.npy' %j)
+            np.save(savefile,Sigma)
+
+        # Save misc covar data
+        print('Saving misc covariance data...')
+        savefile = os.path.join(saveloc,'covar.npz')
+        np.savez(savefile,Dmean=Dmean,idx_fine=idx_fine,idx_coarse=idx_coarse)
+        if eig: np.save(os.path.join(saveloc,'eigs.npy'),eigs)
+
+    #########################
+    # Process subsampled data
+    #########################
+    # Coarse data
+    Dcoarse = D[:,idx_coarse,:]
+    fluid_coarse = fluid[:,idx_coarse]
+
     # Convert D[designs,pts,var] -> D[pts][designs,var+1] (as some nodes have less designs with valid/fluid data). Store in array if datapoint objects
-    print('Rearranging data ordering...')
+    print('Rearranging data ordering for subsampled data...')
+    data = np.empty(Ncoarse,dtype='object')
+    for j in tqdm(range(Ncoarse)):
+        indices = np.argwhere(fluid_coarse[:,j]==1).reshape(-1) # Store indices for valid designs at each node
+        dat = Dcoarse[:,j,:][indices,:]
+        data[j] = datapoint(D=dat,indices=indices)
+
+    print('Saving subsampled data...')
+    if train:
+        np.save(os.path.join(saveloc,'X.npy'),X)
+        np.save(os.path.join(saveloc,'D.npy'),data)
+    else:
+        np.save(os.path.join(saveloc,'X_test.npy'),X)
+        np.save(os.path.join(saveloc,'D_test.npy'),data)
+
+    #############################
+    # NEW: Process original data (so we can calc. error metrics in postproc)
+    #############################
+    # Convert D[designs,pts,var] -> D[pts][designs,var+1] (as some nodes have less designs with valid/fluid data). Store in array if datapoint objects
+    print('Rearranging data ordering for original data...')
     data = np.empty(num_pts,dtype='object')
     for j in tqdm(range(num_pts)):
         indices = np.argwhere(fluid[:,j]==1).reshape(-1) # Store indices for valid designs at each node
         dat = D[:,j,:][indices,:]
         data[j] = datapoint(D=dat,indices=indices)
-    return X,data#,dtag
+
+    print('Saving original data...')
+    if train:
+        np.save(os.path.join(saveloc,'D_orig.npy'),data)
+        return idx_coarse, idx_fine
+    else:
+        np.save(os.path.join(saveloc,'D_test_orig.npy'),data)
 
 saveloc = os.path.join(datadir,'PROCESSED_DATA',casename)
 os.makedirs(saveloc,exist_ok=True)
 
-# Training
-if designs_train is not None:
-    print('\nTraining data...')
-    results = Parallel(n_jobs=n_jobs)(delayed(proc_data)(d,casename,resample=True,solver=solver) for d in tqdm(designs_train))
-    X,D = proc_results(results)
-    print('Saving to file...')
-    np.save(os.path.join(saveloc,'X.npy'),X)
-    np.save(os.path.join(saveloc,'D.npy'),D)
-#    np.save(os.path.join(saveloc,'dtag.npy'),dtag)
+###############
+# Training data
+###############
+print('\nTraining data...')
+results = Parallel(n_jobs=n_jobs)(delayed(proc_data)(d,casename,resample=True,solver=solver) for d in tqdm(designs_train))
+idx_coarse, idx_fine = proc_results(results,saveloc,eig=eig)
 
-# Test
-if designs_test is not None:
-    print('\nTest data...')
-    results = Parallel(n_jobs=n_jobs)(delayed(proc_data)(d,casename,resample=True,solver=solver) for d in tqdm(designs_test))
-    X,D = proc_results(results)
-    print('Saving to file...')
-    np.save(os.path.join(saveloc,'X_test.npy'),X)
-    np.save(os.path.join(saveloc,'D_test.npy'),D)
-#    np.save(os.path.join(saveloc,'dtag_test.npy'),dtag)
+###########
+# Test data
+###########
+print('\nTest data...')
+results = Parallel(n_jobs=n_jobs)(delayed(proc_data)(d,casename,resample=True,solver=solver) for d in tqdm(designs_test))
+proc_results(results,saveloc,idx_coarse=idx_coarse,idx_fine=idx_fine)
+
+print('Finished...')

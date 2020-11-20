@@ -1,4 +1,5 @@
 import numpy as np
+from copy import deepcopy
 
 class datapoint:
     def __init__(self,D,indices):
@@ -118,11 +119,10 @@ def parse_designs(json_dat):
             designs_test = None
     return designs_train, designs_test
 
-def evaluate_subspace(X,mygrf,point,var):
+def evaluate_subspaces(X,mygrf,point,var):
     if mygrf==None:
-        ypred = -99 
-        r2    = -99
-        mae   = -99
+        r2  = np.nan
+        mae = np.nan
     else:
         indices = point.indices
         x = X[indices,:]
@@ -133,11 +133,52 @@ def evaluate_subspace(X,mygrf,point,var):
         mae = mae_score(point.D[:,var],ypred,norm=True)
     return (r2,mae)
 
-def predict_subspace(X,mygrf):
+def predict_design(X,mygrf):
     if mygrf==None:
-        ypred = -99 
+        ypred = np.nan
+        ystd  = 99.0 
     else:
         M = mygrf.M
         u = X @ M
-        ypred = mygrf.predict(u,return_std=False)
-    return ypred
+        ypred, ystd = mygrf.predict(u,return_std=True)
+    return (ypred,ystd)
+
+def get_matrix_inverse(M):
+    """
+    M: numpy matrix.
+    """
+    ll, mm = M.shape
+    M2 = deepcopy(M) + 1e-10 * np.eye(ll)
+    L = np.linalg.cholesky(M2)
+    inv_L = np.linalg.inv(L)
+    inv_M = inv_L.T @ inv_L
+    return inv_M
+
+def rebuild_fine(y_coarse,ystd_coarse, y_mean_coarse,y_mean_fine,Sigma):
+    # Get lengths
+    Ncoarse = y_coarse.shape[0]
+    N       = Sigma.shape[0]
+    Nfine   = N - Ncoarse
+
+    # Decompose Sigma
+    A = Sigma[:Nfine,:Nfine]
+    B = Sigma[:Nfine,Nfine:]
+    C = Sigma[Nfine:,Nfine:]
+
+    # Add eps matrix to C (and set nan predictions to mean)
+    C += (ystd_coarse**2) * np.eye(Ncoarse)
+    idx = np.argwhere(np.isnan(y_coarse))
+    y_coarse[idx] = y_mean_coarse[idx]
+
+    # Get y_fine from Shur complement of C
+    inv_C = get_matrix_inverse(C)
+#    y_fine = y_mean_fine + ( B @ inv_C @ (y_coarse - y_mean_coarse))
+    y_fine = y_mean_fine + np.linalg.multi_dot([B, inv_C, y_coarse - y_mean_coarse])
+
+#    # Get variance of y on fine mesh
+#    y_covar = A - np.linalg.multi_dot([B,inv_C,B.T])
+#    y_std_fine = np.sqrt(np.diag(y_covar))
+    y_std_fine = np.linalg.multi_dot([B, inv_C, ystd_coarse])
+
+    return (y_fine,y_std_fine)
+

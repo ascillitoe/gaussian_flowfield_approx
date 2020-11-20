@@ -1,14 +1,16 @@
 import os
 import sys
 import json
-import pyvista
+import pyvista as pv
 import numpy as np
 from tqdm import tqdm
-from funcs import r2_score, mae_score, standardise_minmax, unstandardise_minmax, proc_bump, 
-evaluate_subspace, predict_subspace, parse_designs
+from funcs import r2_score, mae_score, standardise_minmax, unstandardise_minmax, proc_bump, evaluate_subspaces, predict_design, parse_designs, rebuild_fine
+import matplotlib 
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import pickle
 from joblib import Parallel, delayed, cpu_count
+
 
 basedir = os.getcwd()
 
@@ -49,6 +51,9 @@ if (("label" in json_dat)==True): label = json_dat['label']
 
 field_score = False
 if (("field score" in json_dat)==True): field_score = json_dat['field score']
+
+rebuild = False
+if designs_proc is not None: rebuild = True
 
 designs_train, designs_test = parse_designs(json_dat)
 
@@ -98,44 +103,43 @@ print('Number of nodes = %d' %(num_pts))
 print('Number of bump functions = %d' %(num_bumps))
 if max(vars) > num_vars-1: quit('STOPPING: A vars index is greater than the number of arrays stored in D')
 
-# Base vtk file - Sufficient summary plots, accuracy scores & variance to vtk file
-###########################################################################
+# Read in Base vtk file
 file = os.path.join(datadir,'CFD_DATA',casename,'basegrid.vtk')
 #file = os.path.join(datadir,'CFD_DATA',casename,'baseline.vtk')
-basegrid = pyvista.read(file)
+basegrid = pv.read(file)
 gridcopy = basegrid.copy(deep=True)
 coords = basegrid.points[:,:2]
 vtk_pts = basegrid.n_points
-if (vtk_pts!=num_pts): quit('STOPPING: Number of points in np arrays != vtk points')
 
-if field_score:
-    print('Evaluating subspace grfs at %d nodes...' % num_pts)
-    for var in vars:
-        print('Variable index %d...' % var)
-        results = Parallel(n_jobs=n_jobs)(delayed(evaluate_subspace)(X, mygrfs[j,var], data[j],var) for j in tqdm(range(num_pts)))
-        r2  = np.array([item[0] for item in results])
-        mae = np.array([item[1] for item in results])
+# Read in idx_fine and idx_coarse indexes
+print('Loading subsampling mapping...')
+loadfile = np.load('covar.npz')
+idx_fine   = loadfile['idx_fine']
+idx_coarse = loadfile['idx_coarse']
+if rebuild: Dmean = loadfile['Dmean']
 
-        # Save to basemesh vtk
-        basegrid['r2_var'+str(var)] = np.array(r2)
-        basegrid['mae_var'+str(var)] = np.array(mae)
+# Check dimensions
+Nfine   = len(idx_fine)
+Ncoarse = len(idx_coarse)
+N = Nfine + Ncoarse
+if (Ncoarse!=num_pts): quit('STOPPING: Number of points in np arrays != len(idx_coarse)')
+if (N!=vtk_pts): quit('STOPPING: Sum of points in idx arrays != vtk points')
 
-        # Print average scores
-        print('Average training r2 score = %.3f' %(np.mean(r2[r2>=-1])))
-        print('Average training mae      = %.4f' %(np.mean(mae[mae>=-1])))
+# Read in covariance data if needed
+if rebuild:
+    print('Reading in covariance data for variable...')
+    Sigma = np.empty([N,N,num_vars])
+    for j, var in enumerate(vars):
+        print(var)
+        Sigma[:,:,j] = np.load('covar_%d.npy' %var)
 
-        if (test_score):
-            results = Parallel(n_jobs=n_jobs)(delayed(evaluate_subspace)(X_test, mygrfs[j,var], data_test[j],var) for j in tqdm(range(num_pts)))
-            r2  = np.array([item[0] for item in results])
-            mae = np.array([item[1] for item in results])
-            print('Average test r2 score = %.3f' %(np.mean(r2[r2>=-1])))
-            print('Average test mae      = %.4f' %(np.mean(mae[mae>=-1])))
-
-    os.chdir(saveloc)
-    basegrid.save('basemesh_post.vtk')
-
-# Sufficient summary plots at selected coords 
+#############################################
+# Sufficient summary plots at selected coords
+#############################################
+plot_pts = None
 if plot_pts is not None:
+    coarse_coords = coords[idx_coarse,:]
+
     # Get bump x locations from 0th design
     design = 'design_0000'
     cfd_data = os.path.join(datadir,'CFD_DATA',casename,design)
@@ -143,10 +147,13 @@ if plot_pts is not None:
     bump,lower,upper = proc_bump('deform_hh.cfg')
 
     for p, pt in enumerate(plot_pts):
-        dist = coords - pt   
+        dist = coarse_coords - pt   
         dist = np.sqrt(dist[:,0]**2.0 + dist[:,1]**2.0)
         loc = np.argmin(dist)
         point = data[loc]
+        print('Requested point = (%.4f,%.4f)' %(pt[0],pt[1]))
+        print('Nearest sample point = (%.4f,%.4f)' %(coarse_coords[loc,0],coarse_coords[loc,1]))
+
         indices = point.indices
         x = X[indices,:]
         if test:
@@ -154,26 +161,19 @@ if plot_pts is not None:
             indices_test = point_test.indices
             x_test = X_test[indices_test,:]
 
+        if mygrfs[loc,vars[0]] is None: 
+            print('No grf at this point, skipping...')    
+            continue
+
         for var in vars:
             mygrf = mygrfs[loc,var]
             M = mygrf.M
             u = x @ M
             y = point.D[:,var]
 
-##            # TODO - TEMP DUMP for testing etc
-#            dumpdir = os.path.join(basedir,'DUMP')
-#            os.makedirs(dumpdir,exist_ok=True)
-#            os.chdir(dumpdir)
-#            if var==0:
-#                np.save('pt%d_u.npy' %p,u)
-#                np.save('pt%d_x.npy' %p,x)
-#            np.save('pt%d_subpoly_%d.npy' %(p,var),subpoly)
-#            np.save('pt%d_y_%d.npy' %(p,var),point.D[:,var])
-##            # TODO 
-
             # Summary plot
             fig, ax = plt.subplots()
-            fig.suptitle('Var %d, Point = (%.4f,%.4f)' %(var,coords[loc,0],coords[loc,1]))
+            fig.suptitle('Var %d, Point = (%.4f,%.4f)' %(var,coarse_coords[loc,0],coarse_coords[loc,1]))
             ax.set_xlabel('$\mathbf{w}^T \mathbf{x}$')
             ax.set_ylabel('Var %d' %var)
             ax.plot(u,y,'C0o',ms=8,mec='k',mew=1,alpha=0.6,label='Training') # Plot real field values
@@ -195,7 +195,7 @@ if plot_pts is not None:
             ugrf = np.linspace(np.min(u),np.max(u),50)
             y_mean, y_std = mygrf.predict(ugrf.reshape(-1,1),return_std=True)
             ax.plot(ugrf,y_mean,'C3-',lw=3,label='Mean')
-            ax.fill_between(u,y_mean-y_std,y_mean+y_std,color='C2',label='$\sigma$',alpha=0.3)
+            ax.fill_between(ugrf,y_mean-y_std,y_mean+y_std,color='C2',label='$\sigma$',alpha=0.3)
 
             # Annotate with mae and r2 score
             ypred = mygrf.predict(u,return_std=False)
@@ -215,25 +215,36 @@ if plot_pts is not None:
             with open(filename,'wb') as f:
                 pickle.dump(fig,f)
 
-# TODO
-#            # Plot active modes (M)
-#            for d in range(subdim):
-#                fig, ax = plt.subplots()
-#                fig.suptitle('Var = %d, Mode = %d, Point = (%.4f,%.4f)' %(var, d, coords[loc,0],coords[loc,1]))
-#                ax.set_xlabel('$x/C_x$')
-#                ax.set_ylabel('$\mathbf{w}$')
-#                # Lower surface
-#                ax.plot(lower[:,0],W[loc,var,lower[:,1].astype(int),d],'-oC1',label='Lower')
-#                ax.fill_between(lower[:,0],0,W[loc,var,lower[:,1].astype(int),d],color='C1',alpha=0.3)
-#                ax.plot(upper[:,0],W[loc,var,upper[:,1].astype(int),d],'-oC2',label='Upper')
-#                ax.fill_between(upper[:,0],0,W[loc,var,upper[:,1].astype(int),d],color='C2',alpha=0.3)
-#                ax.legend()
-#
-#                filename = 'weights_pt%d_var%d_subdim%d.pickle' %(p,var,d)
-#                filename = os.path.join(saveloc,'Figures',filename)
-#                with open(filename,'wb') as f:
-#                    pickle.dump(fig,f)
+###################################################################
+# Compute averaged accuracy metrics for training (and test) designs 
+###################################################################
+if field_score:
+    print('Evaluating subspace grfs at %d nodes...' % num_pts)
+    for var in vars:
+        print('Variable index %d...' % var)
+        results = Parallel(n_jobs=n_jobs)(delayed(evaluate_subspaces)(X, mygrfs[j,var], data[j],var) for j in tqdm(range(num_pts)))
+        r2  = np.array([item[0] for item in results])
+        mae = np.array([item[1] for item in results])
+        print('Average training r2 score = %.3f' %(np.nanmean(r2)))
+        print('Average training mae      = %.4f' %(np.nanmean(mae)))
 
+        if (test_score):
+            results = Parallel(n_jobs=n_jobs)(delayed(evaluate_subspaces)(X_test, mygrfs[j,var], data_test[j],var) for j in tqdm(range(num_pts)))
+            r2  = np.array([item[0] for item in results])
+            mae = np.array([item[1] for item in results])
+            print('Average test r2 score = %.3f' %(np.mean(r2[r2>=-1])))
+            print('Average test mae      = %.4f' %(np.mean(mae[mae>=-1])))
+
+            # Save to vtk point clouds
+            points = basegrid.points[idx_coarse]
+            point_cloud = pv.PolyData(points)
+            point_cloud['r2_var'+str(var)] = np.array(r2)
+            point_cloud['mae_var'+str(var)] = np.array(mae)
+
+    os.chdir(saveloc)
+    point_cloud.save('field_scores.vtk')
+
+##############################################################
 # Save predicted fields and errors to vtk for selected designs
 ##############################################################
 if designs_proc is not None:
@@ -244,22 +255,45 @@ if designs_proc is not None:
         cfd_data = os.path.join(datadir,'CFD_DATA',casename,design)
         os.chdir(cfd_data)
         if designmesh: 
-            designgrid = pyvista.read('flow.vtk')
+            designgrid = pv.read('flow.vtk')
         else:
-            designgrid = pyvista.read('flow_base.vtk')
+            designgrid = pv.read('flow_base.vtk')
     
-        # Field predictions (could use D_pred and D here, but get new pred and truth instead so works for designs outside of training/test set)
         Xi,*_ = proc_bump('deform_hh.cfg')
         Xi,*_ = standardise_minmax(Xi.reshape(1,-1), min_value=min_X, max_value=max_X) #Standardise with same min/max as original training x set
-        for var in vars:
+        for j, var in enumerate(vars):
             # Use grf for prediction
-            field_pred = Parallel(n_jobs=n_jobs)(delayed(predict_subspace)(Xi, mygrfs[j,var]) for j in tqdm(range(num_pts)))
-            gridcopy['pred_var'+str(var)] = np.array(field_pred)
+            print("'Evaluating grf's at coarse points for variable %d..." %var)
+            results = Parallel(n_jobs=n_jobs)(delayed(predict_design)(Xi, mygrfs[n,var]) for n in tqdm(range(num_pts)))
+            ypred_coarse = np.array([item[0] for item in results])
+            ystd_coarse  = np.array([item[1] for item in results])
+            
+            # Get prediction on remaining (fine) grid points via Shur complement
+            print('Rebuilding to fine points...')
+            ypred_fine, ystd_fine = rebuild_fine(ypred_coarse,ystd_coarse,Dmean[idx_coarse,var],Dmean[idx_fine,var], Sigma[:,:,j])
+            
+            # Combine coarse and fine grid points
+            ypred = np.empty(N)
+            ypred[idx_fine]   = ypred_fine
+            ypred[idx_coarse] = ypred_coarse
+
+            ystd = np.empty(N)
+            ystd[idx_fine]   = ystd_fine
+            ystd[idx_coarse] = ystd_coarse
+            ystd[ystd==99] = 0.0
+
+            # Calc. error metrics TODO
+
+            # Store final prediction in vtk
+            gridcopy['pred_var'+str(var)] = ypred
+            gridcopy['std_var'+str(var)] = ystd
 
         # Resample back on to design grid
+        print('Resampling to original mesh...')
         gridcopy = gridcopy.sample(designgrid)
 
         # Save vtk
+        print('Saving vtk...')
         savefile = os.path.join(saveloc,'flow_post_design_%04d.vtk' % i)
         gridcopy.save(savefile)
 
