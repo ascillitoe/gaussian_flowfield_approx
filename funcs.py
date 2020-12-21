@@ -182,3 +182,9 @@ def rebuild_fine(y_coarse,ystd_coarse, y_mean_coarse,y_mean_fine,Sigma):
 
     return (y_fine,y_std_fine)
 
+def corr_from_cov(cov):
+    v = np.sqrt(np.diag(cov))
+    outer_v = np.outer(v, v)
+    corr = cov / outer_v
+    corr[cov == 0] = 0
+    return corr

@@ -4,7 +4,7 @@ import json
 import pyvista as pv
 import numpy as np
 from tqdm import tqdm
-from funcs import proc_bump, datapoint, parse_designs
+from funcs import proc_bump, datapoint, parse_designs, corr_from_cov
 from joblib import Parallel, delayed, cpu_count
 
 global basedir, seed
@@ -28,6 +28,9 @@ cutoff          = json_dat['cutoff']
 
 eig = False
 if (("eig" in json_dat)==True): eig = json_dat['eig']
+
+corr = False
+if (("corr" in json_dat)==True): corr = json_dat['corr']
 
 designs_train, designs_test = parse_designs(json_dat)
 
@@ -145,22 +148,42 @@ def proc_results(results,saveloc,idx_coarse=None,idx_fine=None,eig=False):
         Dmean = np.mean(D,axis=0)
 
         print('Computing covariance matrix for variable...')
-        # Reorder data so that fine and course subsets are collocated within the data (and Sigma matrix)
+        # Reorder data so that fine and course subsets are colocated within the data (and Sigma matrix)
         idx_new = np.concatenate([idx_fine,idx_coarse])
         Dnew = D[:,idx_new,:].transpose(1,0,2)  # reshape to (num_pts,num_designs,num_var) ordering
         
         # Obtain covariance matrix 
-        if eig: eigs = np.empty([num_pts,num_vars])
+        Nfine = len(idx_fine)
         for j in range(num_vars):
             print(j)
             Sigma = np.cov(Dnew[:,:,j],bias=True)
         
-            # Compute eigenvalues
+            # Compute eigenvalues and eigenvectors
             if eig:
-                print('Computing eigenvalues...')
-                DD, _ = np.linalg.eigh(Sigma)
+                print('Computing eigen decomposition...')
+                DD, V = np.linalg.eigh(Sigma)
                 idx_eig = DD.argsort()[::-1]
-                eigs[:,j] = DD[idx_eig]
+                Vec  = np.empty([num_pts,5]) # Save the first 5 eigenvector fields only
+                # Save to grid (after reordering)
+                Vec[idx_fine,:]   = V[:Nfine,idx_eig[:5]]
+                Vec[idx_coarse,:] = V[Nfine:,idx_eig[:5]]
+                samplegrid['eigvec_%d' %j] = Vec
+                # Save eigenvec ordered by eigenvalue size
+                print('Saving eigenvalues and eigenvectors...')
+                np.save(os.path.join(saveloc,'eigvals_%d.npy' %j),DD)
+                np.save(os.path.join(saveloc,'eigvecs_%d.npy' %j),V)
+
+            # Compute correlation matrix
+            if corr:
+                print('Computing correlation matrix...')
+                # Rearrange Sigma to original ordering first
+                Sigma_orig = np.cov(D[:,:,j].T,bias=True)
+#                Sigma_orig = np.empty([num_pts,num_pts])
+#                Sigma_orig[np.ix_(idx_fine,idx_fine)]     = Sigma[:Nfine,:Nfine]
+#                Sigma_orig[np.ix_(idx_coarse,idx_coarse)] = Sigma[Nfine:,Nfine:]
+                Corr = corr_from_cov(Sigma_orig)
+                savefile = os.path.join(saveloc,'corr_%d.npy' %j)
+                np.save(savefile,Corr)
 
             # Save to file
             print('Saving covariance data...')
@@ -168,10 +191,12 @@ def proc_results(results,saveloc,idx_coarse=None,idx_fine=None,eig=False):
             np.save(savefile,Sigma)
 
         # Save misc covar data
-        print('Saving misc covariance data...')
+        print('Saving misc data...')
         savefile = os.path.join(saveloc,'covar.npz')
         np.savez(savefile,Dmean=Dmean,idx_fine=idx_fine,idx_coarse=idx_coarse)
-        if eig: np.save(os.path.join(saveloc,'eigs.npy'),eigs)
+        if eig: 
+            print('Saving eigenvectors vtk file...')
+            samplegrid.save(os.path.join(saveloc,'covar_fields.vtk'))
 
     #########################
     # Process subsampled data

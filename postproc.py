@@ -128,10 +128,11 @@ if (N!=vtk_pts): quit('STOPPING: Sum of points in idx arrays != vtk points')
 # Read in covariance data if needed
 if rebuild:
     print('Reading in covariance data for variable...')
-    Sigma = np.empty([N,N,num_vars])
+    Sigma = np.empty([N,N,len(vars)])
     for j, var in enumerate(vars):
         print(var)
-        Sigma[:,:,j] = np.load('covar_%d.npy' %var)
+#        Sigma[:,:,j] = np.load('covar_%d.npy' %var)
+        Sigma[:,:,j] = np.load('covar_lr_%d.npy' %var)
 
 #############################################
 # Sufficient summary plots at selected coords
@@ -190,11 +191,13 @@ if plot_pts is not None:
                 if test: 
                     for i,d in enumerate(point_test.indices):
                         design = designs_test[d]
+                        print(design,i)
                         ax.annotate('%d' % design,[u_test[i],y_test[i]],color='C2')
 
-            ugrf = np.linspace(np.min(u),np.max(u),50)
+            ugrf = np.linspace(-2.25,2.25,50)
             y_mean, y_std = mygrf.predict(ugrf.reshape(-1,1),return_std=True)
             ax.plot(ugrf,y_mean,'C3-',lw=3,label='Mean')
+            y_std *= 1.96
             ax.fill_between(ugrf,y_mean-y_std,y_mean+y_std,color='C2',label='$\sigma$',alpha=0.3)
 
             # Annotate with mae and r2 score
@@ -249,6 +252,8 @@ if field_score:
 ##############################################################
 if designs_proc is not None:
     print('Predicting fields for %d designs...' % len(designs_proc))
+    points = basegrid.points[idx_coarse]
+
     for i in designs_proc:
         design = 'design_%04d' % i
         print(design)
@@ -258,7 +263,9 @@ if designs_proc is not None:
             designgrid = pv.read('flow.vtk')
         else:
             designgrid = pv.read('flow_base.vtk')
-    
+ 
+        point_cloud = pv.PolyData(points)
+   
         Xi,*_ = proc_bump('deform_hh.cfg')
         Xi,*_ = standardise_minmax(Xi.reshape(1,-1), min_value=min_X, max_value=max_X) #Standardise with same min/max as original training x set
         for j, var in enumerate(vars):
@@ -268,6 +275,11 @@ if designs_proc is not None:
             ypred_coarse = np.array([item[0] for item in results])
             ystd_coarse  = np.array([item[1] for item in results])
             
+            # Save coarse results as point cloud
+            # Save to vtk point clouds
+            point_cloud['ypred'+str(var)] = ypred_coarse
+            point_cloud['ystd'+str(var)] = ystd_coarse
+
             # Get prediction on remaining (fine) grid points via Shur complement
             print('Rebuilding to fine points...')
             ypred_fine, ystd_fine = rebuild_fine(ypred_coarse,ystd_coarse,Dmean[idx_coarse,var],Dmean[idx_fine,var], Sigma[:,:,j])
@@ -280,9 +292,7 @@ if designs_proc is not None:
             ystd = np.empty(N)
             ystd[idx_fine]   = ystd_fine
             ystd[idx_coarse] = ystd_coarse
-            ystd[ystd==99] = 0.0
-
-            # Calc. error metrics TODO
+            ystd[ystd==99] = 1.0
 
             # Store final prediction in vtk
             gridcopy['pred_var'+str(var)] = ypred
@@ -296,5 +306,9 @@ if designs_proc is not None:
         print('Saving vtk...')
         savefile = os.path.join(saveloc,'flow_post_design_%04d.vtk' % i)
         gridcopy.save(savefile)
+
+        savefile = os.path.join(saveloc,'points_post_design_%04d.vtk' % i)
+        point_cloud.save(savefile)
+
 
 plt.show()
